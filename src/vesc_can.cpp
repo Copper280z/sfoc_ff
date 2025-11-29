@@ -46,6 +46,7 @@ void CanInterface::begin() {
     CanFilter filter = CanFilter(MASK_EXTENDED, this->can_address, 0xFF, FILTER_ANY_FRAME);
     this->can->filter(filter);
     this->can->begin(this->can_speed);
+    this->time_of_last_comm = micros();
 }
 
 void CanInterface::enableRemote(bool enable) {
@@ -153,7 +154,7 @@ void CanInterface::process_short_buffer(CanMsg rxMsg) {
         case VescCmd::COMM_GET_VALUES_SELECTIVE:
             this->time_of_last_comm = micros();
             if (!this->motor->enabled) {
-                if (!this->remote_enable) {
+                if (this->remote_enable) {
                     this->motor->enable();
                 }
             }
