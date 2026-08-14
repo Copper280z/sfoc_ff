@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <stdint.h>
 #include "SimpleCAN.h"
 #include "SimpleFOC.h"
@@ -28,6 +29,8 @@ public:
 
 private:
     void process_short_buffer(CanMsg rxMsg);
+    void queue_buffer_response(uint8_t controller_id, const uint8_t *data, uint8_t len, uint8_t send);
+    void process_buffer_response();
     BaseCAN *can = nullptr;
     FOCMotor *motor = nullptr;
 
@@ -38,7 +41,11 @@ private:
     uint8_t can_address = 0xFF;
     uint8_t remote_enable = 1;
 
-    // uint8_t buffer_rx[BUFFER_RX_SIZE]; // may be used to store multi-frame messages, currently unused
+    std::array<uint8_t, BUFFER_RX_SIZE> tx_buffer{};
+    uint8_t tx_buffer_len = 0;
+    uint8_t tx_buffer_offset = 0;
+    uint8_t tx_controller_id = 0;
+    uint8_t tx_send = 0;
+    bool tx_buffer_pending = false;
 
 };
-

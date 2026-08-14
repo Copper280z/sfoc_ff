@@ -27,6 +27,17 @@ enum VescCmd : uint8_t {
 	COMM_GET_VALUES_SELECTIVE = 50
 };
 
+static uint16_t calculate_crc16(const uint8_t *data, uint8_t len) {
+    uint16_t crc = 0;
+    for (uint8_t i = 0; i < len; i++) {
+        crc ^= static_cast<uint16_t>(data[i]) << 8;
+        for (uint8_t bit = 0; bit < 8; bit++) {
+            crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1;
+        }
+    }
+    return crc;
+}
+
 void CanInterface::linkCan(BaseCAN *_can) {
     this->can = _can;
 }
@@ -93,6 +104,7 @@ void CanInterface::run() {
                 if (!this->remote_enable) {
                     break;
                 }
+                this->time_of_last_comm = micros();
                 int32_t int_tq = 0;
                 memcpy(&int_tq, rxMsg.data, 4);
                 int_tq = __builtin_bswap32(int_tq);
@@ -125,6 +137,63 @@ void CanInterface::run() {
         }
         
     }
+
+    this->process_buffer_response();
+}
+
+void CanInterface::queue_buffer_response(uint8_t controller_id, const uint8_t *data, uint8_t len, uint8_t send) {
+    if (len > this->tx_buffer.size()) return;
+
+    memcpy(this->tx_buffer.data(), data, len);
+    this->tx_buffer_len = len;
+    this->tx_buffer_offset = 0;
+    this->tx_controller_id = controller_id;
+    this->tx_send = send;
+    this->tx_buffer_pending = true;
+}
+
+void CanInterface::process_buffer_response() {
+    if (!this->tx_buffer_pending) return;
+
+    std::array<uint8_t, 8> frame{};
+    CanMsg txMsg;
+
+    if (this->tx_buffer_len <= 6) {
+        frame[0] = this->can_address;
+        frame[1] = this->tx_send;
+        memcpy(&frame[2], this->tx_buffer.data(), this->tx_buffer_len);
+        txMsg = CanMsg(CanExtendedId(this->tx_controller_id | (VescCANMsg::CAN_PACKET_PROCESS_SHORT_BUFFER << 8)),
+                       this->tx_buffer_len + 2, frame.data());
+        if (this->can->write(txMsg) == CAN_OK) {
+            this->tx_buffer_pending = false;
+        }
+        return;
+    }
+
+    if (this->tx_buffer_offset < this->tx_buffer_len) {
+        uint8_t chunk_len = std::min<uint8_t>(7, this->tx_buffer_len - this->tx_buffer_offset);
+        frame[0] = this->tx_buffer_offset;
+        memcpy(&frame[1], &this->tx_buffer[this->tx_buffer_offset], chunk_len);
+        txMsg = CanMsg(CanExtendedId(this->tx_controller_id | (VescCANMsg::CAN_PACKET_FILL_RX_BUFFER << 8)),
+                       chunk_len + 1, frame.data());
+        if (this->can->write(txMsg) == CAN_OK) {
+            this->tx_buffer_offset += chunk_len;
+        }
+        return;
+    }
+
+    uint16_t crc = calculate_crc16(this->tx_buffer.data(), this->tx_buffer_len);
+    frame[0] = this->can_address;
+    frame[1] = this->tx_send;
+    frame[2] = 0;
+    frame[3] = this->tx_buffer_len;
+    frame[4] = crc >> 8;
+    frame[5] = crc;
+    txMsg = CanMsg(CanExtendedId(this->tx_controller_id | (VescCANMsg::CAN_PACKET_PROCESS_RX_BUFFER << 8)),
+                   6, frame.data());
+    if (this->can->write(txMsg) == CAN_OK) {
+        this->tx_buffer_pending = false;
+    }
 }
 
 void CanInterface::process_short_buffer(CanMsg rxMsg) {
@@ -152,6 +221,7 @@ void CanInterface::process_short_buffer(CanMsg rxMsg) {
             this->can->write(txMsg); 
             break;
         case VescCmd::COMM_GET_VALUES_SELECTIVE:
+            // I think this line should be removed to match upstream VESC
             this->time_of_last_comm = micros();
             if (!this->motor->enabled) {
                 if (this->remote_enable) {
@@ -163,46 +233,24 @@ void CanInterface::process_short_buffer(CanMsg rxMsg) {
             memcpy(&request, &rxMsg.data[3], 4);
             request = __builtin_bswap32(request);
 
-            // TODO
-            // this needs to use the FILL_BUFFER part of the protocol
-            // the voltage message is too long to fit in an 8 byte CAN frame, so this wont work
+            uint32_t response = request & ((1UL << 8) | (1UL << 15));
+            ind = 0;
+            buffer[ind++] = VescCmd::COMM_GET_VALUES_SELECTIVE;
+            buffer[ind++] = response >> 24;
+            buffer[ind++] = response >> 16;
+            buffer[ind++] = response >> 8;
+            buffer[ind++] = response;
 
-            if (request & (1<<8)) {
-                ind=0;
-                buffer[ind++] = this->can_address;
-                buffer[ind++] = 0; // process this pls
-                buffer[ind++] = VescCmd::COMM_GET_VALUES_SELECTIVE;
-                uint32_t tmp_req = __builtin_bswap32(1<<8);
-                memcpy(&buffer[ind],&tmp_req,4);
-                ind+=4;
-                // send voltage
-                int16_t scaled_voltage = (int16_t) (this->voltage*10.0f);
-                buffer[ind++] = scaled_voltage>>8;
-
-
-                // ind+=2; // commented out because if we try to send an invalid frame, it gets null'd out on us
-                // so only send the voltage MS Byte
-                txMsg = CanMsg(CanExtendedId(sendTo | (VescCANMsg::CAN_PACKET_PROCESS_SHORT_BUFFER<<8)), ind, buffer.data());
-                this->can->write(txMsg); 
+            if (response & (1UL << 8)) {
+                int16_t scaled_voltage = static_cast<int16_t>(this->voltage * 10.0f);
+                buffer[ind++] = static_cast<uint16_t>(scaled_voltage) >> 8;
+                buffer[ind++] = scaled_voltage;
             }
-            if (request & (1<<15)) {
-                ind=0;
-                buffer[ind++] = this->can_address;
-                buffer[ind++] = 0; // process this pls
-                buffer[ind++] = VescCmd::COMM_GET_VALUES_SELECTIVE;
-                uint32_t tmp_req = __builtin_bswap32(1<<15);
-                memcpy(&buffer[ind],&tmp_req,4);
-
-                ind+=4;
-                // send status
-                uint8_t status = 0;
-                if (error_state) {
-                    status = 1;
-                }
-                buffer[ind++] = status;
-                txMsg = CanMsg(CanExtendedId(sendTo | (VescCANMsg::CAN_PACKET_PROCESS_SHORT_BUFFER<<8)), ind, buffer.data());
-                this->can->write(txMsg); 
+            if (response & (1UL << 15)) {
+                buffer[ind++] = this->error_state ? 1 : 0;
             }
+
+            this->queue_buffer_response(sendTo, buffer.data(), ind, 1);
 
  
             break;

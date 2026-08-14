@@ -67,7 +67,7 @@ bool STM_FDCAN::begin(int bitrate)
   init->ClockDivider = FDCAN_CLOCK_DIV1;
   init->FrameFormat = FDCAN_FRAME_CLASSIC; // TODO: We may want to support faster FDCAN_FRAME_FD_BRS;
   init->Mode = mode == CAN_LOOPBACK ? FDCAN_MODE_INTERNAL_LOOPBACK : FDCAN_MODE_NORMAL;
-  init->AutoRetransmission = DISABLE;
+  init->AutoRetransmission = ENABLE;
   init->TransmitPause = ENABLE;
   init->ProtocolException = DISABLE;
 
